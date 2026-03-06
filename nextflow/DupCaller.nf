@@ -148,6 +148,8 @@ process TRIM_BARCODES {
     tag "${sample_name}"
     publishDir "${params.outdir}/${sample_name}/trimmed", mode: 'copy'
 
+    label 'dupcaller-nextflow'
+
     input:
     tuple val(sample_name), path(read1), path(read2)
 
@@ -171,6 +173,8 @@ process BWA_ALIGN {
     tag "${sample_name}"
     publishDir "${params.outdir}/${sample_name}/aligned", mode: 'copy'
     cpus params.threads
+
+    label 'dupcaller-nextflow'
 
     input:
     tuple val(sample_name), path(read1), path(read2), path(reference)
@@ -198,6 +202,8 @@ process BWA_ALIGN {
 process MARK_DUPLICATES {
     tag "${sample_name}"
     publishDir "${params.outdir}/${sample_name}/markdup", mode: 'copy'
+
+    label 'dupcaller-nextflow'
 
     input:
     tuple val(sample_name), path(bam), path(bai)
@@ -227,6 +233,8 @@ process CALL_VARIANTS {
     tag "${sample_name}"
     publishDir "${params.outdir}/${sample_name}/variants", mode: 'copy'
     cpus params.threads
+
+    label 'dupcaller-nextflow'
 
     input:
     tuple val(sample_name), path(bam), path(bai), path(metrics), path(reference), path(ref_h5), path(tn_h5), path(hp_h5)
@@ -282,6 +290,8 @@ process CALL_VARIANTS {
 process ESTIMATE_BURDEN {
     tag "${sample_name}"
     publishDir "${params.outdir}/${sample_name}/burden", mode: 'copy'
+
+    label 'dupcaller-nextflow'
 
     input:
     tuple val(sample_name),
