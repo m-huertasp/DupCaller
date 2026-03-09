@@ -32,6 +32,9 @@ RUN micromamba run -n base python3 -c "import pysam; print(pysam.__version__)"
 COPY setup.py /opt/DupCaller/setup.py
 COPY src /opt/DupCaller/src
 WORKDIR /opt/DupCaller
-RUN micromamba run -n base pip install -e .
+RUN micromamba run -n base pip install .
+
+# Ensure micromamba base environment is in PATH
+ENV PATH=/opt/conda/bin:$PATH
 
 CMD ["bash"]
