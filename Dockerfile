@@ -6,7 +6,7 @@ USER root
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
-    apt-get -y install gcc mono-mcs && \
+    apt-get -y install gcc mono-mcs procps && \
     rm -rf /var/lib/apt/lists/*
 
 # Install GATK, Samtools, BWA, and Tabix (htslib)
