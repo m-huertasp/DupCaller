@@ -36,3 +36,7 @@ tmp/
 temp/
 
 CHANGES_SUMMARY.md
+
+# Nextflow files
+.nextflow.log*
+
