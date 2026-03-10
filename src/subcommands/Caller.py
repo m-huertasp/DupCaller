@@ -744,7 +744,7 @@ def do_call(args):
     if args.threads > 1:
         mergeStartTime = time.time()
         sample_name = os.path.basename(args.output)
-        sample_dir = os.path.join("tmp", sample_name)
+        sample_dir = "tmp"
         merge_and_combine_coverage_files(sample_name, sample_dir, args.threads)
         subprocess.run(
             f"mv {os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz')} .",
