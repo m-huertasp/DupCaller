@@ -107,14 +107,16 @@ def check_input_files_exist(args):
 def do_call(args):
     # Check if all input files exist before proceeding
     check_input_files_exist(args)
-    if "/" not in args.output:
-        if not os.path.exists(args.output):
+    # Only create subdirectory structure if output path contains a directory separator
+    # For workflow contexts (like Nextflow), the output is just a prefix for files in current dir
+    if "/" in args.output:
+        output_dir = os.path.dirname(args.output)
+        if output_dir and not os.path.exists(output_dir):
             try:
-                os.mkdir(args.output)
+                os.makedirs(output_dir)
             except OSError as e:
                 if e.errno != errno.EEXIST:
                     raise
-        args.output = args.output + "/" + args.output
     params = {
         "tumorBam": args.bam,
         "normalBams": args.normalBams,
@@ -745,12 +747,12 @@ def do_call(args):
         sample_dir = os.path.join("tmp", sample_name)
         merge_and_combine_coverage_files(sample_name, sample_dir, args.threads)
         subprocess.run(
-            f"mv {os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz')} {sample_name}/",
+            f"mv {os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz')} .",
             shell=True,
             check=True,
         )
         subprocess.run(
-            f"mv {os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz.tbi')} {sample_name}/",
+            f"mv {os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz.tbi')} .",
             shell=True,
             check=True,
         )
