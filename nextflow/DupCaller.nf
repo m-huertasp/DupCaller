@@ -177,7 +177,7 @@ process BWA_ALIGN {
     label 'dupcaller_nextflow'
 
     input:
-    tuple val(sample_name), path(read1), path(read2), path(reference)
+    tuple val(sample_name), path(read1), path(read2), path(reference), path(ref_amb), path(ref_ann), path(ref_bwt), path(ref_pac), path(ref_sa)
 
     output:
     tuple val(sample_name), path("${sample_name}.bam"), path("${sample_name}.bam.bai")
@@ -240,7 +240,9 @@ process CALL_VARIANTS {
     tuple val(sample_name), path(bam), path(bai), path(metrics), path(reference), path(ref_h5), path(tn_h5), path(hp_h5)
     path(normal_bam)
     path(germline_vcf)
+    path(germline_index)
     path(noise_mask)
+    path(noise_index)
     path(indel_bed)
 
     output:
@@ -257,10 +259,10 @@ process CALL_VARIANTS {
           path("${sample_name}.dmg.id.txt")
 
     script:
-    def normal_arg = normal_bam.name != 'NO_FILE' ? "-n ${normal_bam}" : ""
-    def germline_arg = germline_vcf.name != 'NO_FILE' ? "-g ${germline_vcf}" : ""
-    def noise_arg = noise_mask.name != 'NO_FILE' ? "-m ${noise_mask}" : ""
-    def indel_arg = indel_bed.name != 'NO_FILE' ? "-id ${indel_bed}" : ""
+    def normal_arg = normal_bam.name != 'NO_NORMAL' ? "-n ${normal_bam}" : ""
+    def germline_arg = germline_vcf.name != 'NO_GERMLINE' ? "-g ${germline_vcf}" : ""
+    def noise_arg = noise_mask.name != 'NO_NOISE' ? "-m ${noise_mask}" : ""
+    def indel_arg = indel_bed.name != 'NO_INDEL' ? "-id ${indel_bed}" : ""
 
     """
     DupCaller.py call \\
@@ -322,7 +324,7 @@ process ESTIMATE_BURDEN {
           path("${sample_name}_duplex_allele_counts.txt")
 
     script:
-    def gene_arg = gene_bed.name != 'NO_FILE' ? "-gb ${gene_bed}" : ""
+    def gene_arg = gene_bed.name != 'NO_GENE' ? "-gb ${gene_bed}" : ""
     def clonal_arg = params.estimate_clonal ? "-c true" : ""
     def dilute_arg = params.estimate_dilute ? "-d true" : ""
 
@@ -358,13 +360,17 @@ workflow {
     ref_h5 = params.reference+".ref.h5"
     tn_h5 = params.reference+".tn.h5"
     hp_h5 = params.reference+".hp.h5"
-
+    indexes = Channel.fromPath(params.reference+".{amb,ann,bwt,pac,sa}", checkIfExists: true).collect()
 
     // Handle optional files
-    germline_ch = params.germline_vcf ? Channel.fromPath(params.germline_vcf, checkIfExists: true) : Channel.value(file('NO_FILE'))
-    noise_ch = params.noise_mask ? Channel.fromPath(params.noise_mask, checkIfExists: true) : Channel.value(file('NO_FILE'))
-    indel_ch = params.indel_bed ? Channel.fromPath(params.indel_bed, checkIfExists: true) : Channel.value(file('NO_FILE'))
-    gene_ch = params.gene_bed ? Channel.fromPath(params.gene_bed, checkIfExists: true) : Channel.value(file('NO_FILE'))
+    germline_ch = params.germline_vcf ? Channel.fromPath(params.germline_vcf, checkIfExists: true) : Channel.value(file('NO_GERMLINE'))
+    germline_index_ch = params.germline_vcf ? Channel.fromPath(params.germline_vcf + ".tbi", checkIfExists: true) : Channel.value(file('NO_GERMLINE_IDX'))
+    
+    noise_ch = params.noise_mask ? Channel.fromPath(params.noise_mask, checkIfExists: true) : Channel.value(file('NO_NOISE'))
+    noise_index_ch = params.noise_mask ? Channel.fromPath(params.noise_mask + ".tbi", checkIfExists: true) : Channel.value(file('NO_NOISE_IDX'))
+    
+    indel_ch = params.indel_bed ? Channel.fromPath(params.indel_bed, checkIfExists: true) : Channel.value(file('NO_INDEL'))
+    gene_ch = params.gene_bed ? Channel.fromPath(params.gene_bed, checkIfExists: true) : Channel.value(file('NO_GENE')) 
 
     // Tumor sample processing
     if (!params.skip_trim && params.read1 && params.read2) {
@@ -373,7 +379,7 @@ workflow {
         trimmed = TRIM_BARCODES(reads_ch)
 
         // Combine with reference
-        align_input = trimmed.combine(ref_ch)
+        align_input = trimmed.combine(ref_ch).combine(indexes)
         aligned = BWA_ALIGN(align_input)
     } else if (params.skip_trim) {
         error "BAM file input not yet implemented. Please provide --read1 and --read2"
@@ -388,21 +394,26 @@ workflow {
     } else if (params.normal_read1 && params.normal_read2 && !params.skip_normal) {
         normal_reads = Channel.of(["normal_${params.sample_name}", file(params.normal_read1), file(params.normal_read2)])
         normal_trimmed = TRIM_BARCODES(normal_reads)
-        normal_align_input = normal_trimmed.combine(indexed_ref)
+        normal_align_input = normal_trimmed.combine(ref_ch).combine(indexes)
         normal_aligned = BWA_ALIGN(normal_align_input)
         normal_markdup = MARK_DUPLICATES(normal_aligned)
         normal_ch = normal_markdup.map { it[1] }
     } else {
-        normal_ch = Channel.value(file('NO_FILE'))
+        normal_ch = Channel.value(file('NO_NORMAL'))
     }
 
     // Variant calling
-    call_input = markdup.combine(ref_ch)
+    // Add h5 files to the call_input tuple
+    ref_files_ch = Channel.of([file(ref_h5), file(tn_h5), file(hp_h5)])
+    call_input = markdup.combine(ref_ch).combine(ref_files_ch)
+    
     variants = CALL_VARIANTS(
         call_input,
         normal_ch,
         germline_ch,
+        germline_index_ch,
         noise_ch,
+        noise_index_ch,
         indel_ch
     )
 
