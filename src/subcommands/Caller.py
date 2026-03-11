@@ -746,16 +746,41 @@ def do_call(args):
         sample_name = os.path.basename(args.output)
         sample_dir = "tmp"
         merge_and_combine_coverage_files(sample_name, sample_dir, args.threads)
-        subprocess.run(
-            f"mv {os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz')} .",
-            shell=True,
-            check=True,
-        )
-        subprocess.run(
-            f"mv {os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz.tbi')} .",
-            shell=True,
-            check=True,
-        )
+        
+        # Determine output directory
+        # For Nextflow: output to current directory (no path separator)
+        # For standalone: output to specified directory
+        if "/" in args.output:
+            output_dir = os.path.dirname(args.output)
+        else:
+            output_dir = "."
+        
+        # Move files from tmp to output directory
+        coverage_file_src = os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz')
+        coverage_idx_src = os.path.join(sample_dir, f'{sample_name}_coverage.bed.gz.tbi')
+        coverage_file_dst = os.path.join(output_dir, f'{sample_name}_coverage.bed.gz')
+        coverage_idx_dst = os.path.join(output_dir, f'{sample_name}_coverage.bed.gz.tbi')
+        
+        if os.path.exists(coverage_file_src):
+            subprocess.run(
+                f"mv {coverage_file_src} {coverage_file_dst}",
+                shell=True,
+                check=True,
+            )
+            print(f"Moved coverage file to: {coverage_file_dst}")
+        else:
+            print(f"WARNING: Coverage file not found: {coverage_file_src}")
+            
+        if os.path.exists(coverage_idx_src):
+            subprocess.run(
+                f"mv {coverage_idx_src} {coverage_idx_dst}",
+                shell=True,
+                check=True,
+            )
+            print(f"Moved coverage index to: {coverage_idx_dst}")
+        else:
+            print(f"WARNING: Coverage index not found: {coverage_idx_src}")
+            
         print(
             "..............Completed coverage merging in "
             + str((time.time() - mergeStartTime) / 60)
@@ -782,7 +807,10 @@ def merge_and_combine_coverage_files(sample_name, sample_dir, nprocess):
             sample_dir, f"{sample_name}_{n}_{n+1}_overlap_coverage.tmp.bed.gz"
         )
 
-        merge_adjacent_bed_files(next_file, prev_file, overlap_file)
+        if os.path.exists(next_file) and os.path.exists(prev_file):
+            merge_adjacent_bed_files(next_file, prev_file, overlap_file)
+        else:
+            print(f"WARNING: Skipping merge for process {n} (files not found)")
 
     # Step 2: Create list of files in the correct order
     files_to_combine = []
@@ -790,20 +818,20 @@ def merge_and_combine_coverage_files(sample_name, sample_dir, nprocess):
     for n in range(nprocess):
         # Add main coverage file
         main_file = os.path.join(sample_dir, f"{sample_name}_{n}_coverage.bed.gz")
-        if not os.path.exists(main_file):
-            raise FileNotFoundError(f"Expected coverage file not found: {main_file}")
-        files_to_combine.append(main_file)
+        if os.path.exists(main_file):
+            files_to_combine.append(main_file)
+        else:
+            print(f"WARNING: Main coverage file not found: {main_file}")
 
         # Add overlap file (except for the last process)
         if n < nprocess - 1:
             overlap_file = os.path.join(
                 sample_dir, f"{sample_name}_{n}_{n+1}_overlap_coverage.tmp.bed.gz"
             )
-            if not os.path.exists(overlap_file):
-                raise FileNotFoundError(
-                    f"Expected overlap coverage file not found: {overlap_file}"
-                )
-            files_to_combine.append(overlap_file)
+            if os.path.exists(overlap_file):
+                files_to_combine.append(overlap_file)
+            else:
+                print(f"WARNING: Overlap coverage file not found: {overlap_file}")
 
     # Step 3: Combine files using cat command
     if files_to_combine:
@@ -826,11 +854,14 @@ def merge_and_combine_coverage_files(sample_name, sample_dir, nprocess):
 
         except subprocess.CalledProcessError as e:
             print(f"Error combining files: {e}")
+            raise
 
         # Clean up temporary files
         cleanup_temp_files(sample_name, sample_dir, nprocess)
     else:
-        print("No coverage files found to combine")
+        error_msg = "No coverage files found to combine"
+        print(f"ERROR: {error_msg}")
+        raise FileNotFoundError(error_msg)
 
 
 def merge_adjacent_bed_files(next_file, prev_file, output_file):
@@ -841,7 +872,8 @@ def merge_adjacent_bed_files(next_file, prev_file, output_file):
 
     # Read next_region file
     if not os.path.exists(next_file):
-        raise FileNotFoundError(f"Expected file for merging not found: {next_file}")
+        print(f"WARNING: File for merging not found: {next_file}")
+        return
     with bgzf.open(next_file, "rt") as f:
         for line in f:
             line = line.strip()
@@ -854,7 +886,8 @@ def merge_adjacent_bed_files(next_file, prev_file, output_file):
 
     # Read prev_region file and merge
     if not os.path.exists(prev_file):
-        raise FileNotFoundError(f"Expected file for merging not found: {prev_file}")
+        print(f"WARNING: File for merging not found: {prev_file}")
+        return
     with bgzf.open(prev_file, "rt") as f:
         for line in f:
             line = line.strip()
@@ -870,9 +903,12 @@ def merge_adjacent_bed_files(next_file, prev_file, output_file):
                         coverage_dict[key] = [int(cov1), int(cov2)]
 
     # Write merged result only if there's data
-    with bgzf.open(output_file, "wt") as f:
-        for (chrom, start, end), (cov1, cov2) in sorted(coverage_dict.items()):
-            f.write(f"{chrom}\t{start}\t{end}\t{cov1}\t{cov2}\n")
+    if coverage_dict:
+        with bgzf.open(output_file, "wt") as f:
+            for (chrom, start, end), (cov1, cov2) in sorted(coverage_dict.items()):
+                f.write(f"{chrom}\t{start}\t{end}\t{cov1}\t{cov2}\n")
+    else:
+        print(f"WARNING: No data to write for overlap file: {output_file}")
 
 
 def cleanup_temp_files(sample_name, sample_dir, nprocess):
