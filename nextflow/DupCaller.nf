@@ -22,6 +22,7 @@ params.read2 = null
 params.normal_read1 = null
 params.normal_read2 = null
 params.normal_bam = null
+params.samplesheet = null
 
 // Reference files
 params.reference = null
@@ -39,6 +40,7 @@ params.platform = "ILLUMINA"
 
 // DupCaller parameters
 params.regions = "chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr20 chr21 chr22 chrX chrY"
+params.region_file = null
 params.max_af = 1.0
 params.germline_af_cutoff = 0.001
 params.min_n_depth = 10
@@ -141,241 +143,41 @@ if (!params.reference) {
     error "Error: --reference is required"
 }
 
-/*
- * Process: Trim barcodes from fastq files
- */
-process TRIM_BARCODES {
-    tag "${sample_name}"
-    publishDir "${params.outdir}/${sample_name}/trimmed", mode: 'copy'
 
-    label 'dupcaller_nextflow'
+include { INPUT_CHECK                                                           } from './subworkflows/input_check'
+include { TRIM_BARCODES                                                         } from './modules/trim_barcodes'
+include { BWA_ALIGN                                                             } from './modules/bwa_align'
+include { MARK_DUPLICATES                                                       } from './modules/mark_duplicates'
+include { CALL_VARIANTS                                                         } from './modules/call_variants'
+include { ESTIMATE_BURDEN                                                       } from './modules/estimate_burden'
 
-    input:
-    tuple val(sample_name), path(read1), path(read2)
 
-    output:
-    tuple val(sample_name), path("${sample_name}_1.fastq"), path("${sample_name}_2.fastq")
-
-    script:
-    """
-    DupCaller.py trim \\
-        -i ${read1} \\
-        -i2 ${read2} \\
-        -p ${params.barcode_pattern} \\
-        -o ${sample_name}
-    """
-}
-
-/*
- * Process: Align reads with BWA-MEM
- */
-process BWA_ALIGN {
-    tag "${sample_name}"
-    publishDir "${params.outdir}/${sample_name}/aligned", mode: 'copy'
-    cpus params.threads
-
-    label 'dupcaller_nextflow'
-
-    input:
-    tuple val(sample_name), path(read1), path(read2), path(reference), path(ref_amb), path(ref_ann), path(ref_bwt), path(ref_pac), path(ref_sa)
-
-    output:
-    tuple val(sample_name), path("${sample_name}.bam"), path("${sample_name}.bam.bai")
-
-    script:
-    def rg_id = params.read_group_id ?: sample_name
-    """
-    bwa mem -C \\
-        -t ${params.threads} \\
-        -R "@RG\\tID:${rg_id}\\tSM:${sample_name}\\tPL:${params.platform}" \\
-        ${reference} \\
-        ${read1} ${read2} | \\
-    samtools sort -@ ${params.threads} -o ${sample_name}.bam
-
-    samtools index -@ ${params.threads} ${sample_name}.bam
-    """
-}
-
-/*
- * Process: Mark duplicates with GATK
- */
-process MARK_DUPLICATES {
-    tag "${sample_name}"
-    publishDir "${params.outdir}/${sample_name}/markdup", mode: 'copy'
-
-    label 'dupcaller_nextflow'
-
-    input:
-    tuple val(sample_name), path(bam), path(bai)
-
-    output:
-    tuple val(sample_name), path("${sample_name}.mkdped.bam"), path("${sample_name}.mkdped.bam.bai"), path("${sample_name}.mkdp_metrics.txt")
-
-    script:
-    """
-    gatk MarkDuplicates \\
-        -I ${bam} \\
-        -O ${sample_name}.mkdped.bam \\
-        -M ${sample_name}.mkdp_metrics.txt \\
-        --READ_NAME_REGEX "(?:.*:)?([0-9]+)[^:]*:([0-9]+)[^:]*:([0-9]+)[^:]*\$" \\
-        --DUPLEX_UMI \\
-        --TAGGING_POLICY OpticalOnly \\
-        --BARCODE_TAG DB
-
-    samtools index ${sample_name}.mkdped.bam
-    """
-}
-
-/*
- * Process: Call variants with DupCaller
- */
-process CALL_VARIANTS {
-    tag "${sample_name}"
-    publishDir "${params.outdir}/${sample_name}/variants", mode: 'copy'
-    cpus params.threads
-
-    label 'dupcaller_nextflow'
-
-    input:
-    tuple val(sample_name), path(bam), path(bai), path(metrics), path(reference), path(ref_h5), path(tn_h5), path(hp_h5)
-    path(normal_bam)
-    path(germline_vcf)
-    path(germline_index)
-    path(noise_mask)
-    path(noise_index)
-    path(indel_bed)
-
-    output:
-    tuple val(sample_name),
-          path("${sample_name}_snv.vcf"),
-          path("${sample_name}_indel.vcf"),
-          path("${sample_name}_coverage.bed.gz"),
-          path("${sample_name}_trinuc_by_duplex_group.txt"),
-          path("${sample_name}_duplex_group_stats.txt"),
-          path("${sample_name}_stats.txt"),
-          path("${sample_name}.amp.tn.txt"),
-          path("${sample_name}.amp.id.txt"),
-          path("${sample_name}.dmg.tn.txt"),
-          path("${sample_name}.dmg.id.txt")
-
-    script:
-    def normal_arg = normal_bam.name != 'NO_NORMAL' ? "-n ${normal_bam}" : ""
-    def germline_arg = germline_vcf.name != 'NO_GERMLINE' ? "-g ${germline_vcf}" : ""
-    def noise_arg = noise_mask.name != 'NO_NOISE' ? "-m ${noise_mask}" : ""
-    def indel_arg = indel_bed.name != 'NO_INDEL' ? "-id ${indel_bed}" : ""
-
-    """
-    DupCaller.py call \\
-        -b ${bam} \\
-        -f ${reference} \\
-        -o ${sample_name} \\
-        -p ${params.threads} \\
-        -r ${params.regions} \\
-        ${normal_arg} \\
-        ${germline_arg} \\
-        ${noise_arg} \\
-        ${indel_arg} \\
-        -maf ${params.max_af} \\
-        -gaf ${params.germline_af_cutoff} \\
-        -d ${params.min_n_depth} \\
-        -z ${params.max_zero_qual_frac} \\
-        -tt ${params.trim_template} \\
-        -tr ${params.trim_read} \\
-        -mq ${params.mapq} \\
-        -w ${params.window_size}
-    """
-}
-
-/*
- * Process: Estimate mutation burden
- */
-process ESTIMATE_BURDEN {
-    tag "${sample_name}"
-    publishDir "${params.outdir}/${sample_name}/burden", mode: 'copy'
-
-    label 'dupcaller_nextflow'
-
-    input:
-    tuple val(sample_name),
-          path(snv_vcf),
-          path(indel_vcf),
-          path(coverage),
-          path(trinuc),
-          path(duplex_stats),
-          path(stats),
-          path(amp_tn),
-          path(amp_id),
-          path(dmg_tn),
-          path(dmg_id),
-          path(reference),
-          path(ref_h5),
-          path(tn_h5),
-          path(hp_h5)
-    path(gene_bed)
-
-    output:
-    tuple val(sample_name),
-          path("${sample_name}_sbs_burden.txt"),
-          path("${sample_name}_indel_burden.txt"),
-          path("${sample_name}_sbs_96_corrected.txt"),
-          path("${sample_name}_sbs_96_corrected.png"),
-          path("${sample_name}_sbs_burden_by_min_read_group_size.txt"),
-          path("${sample_name}_sbs_burden_by_min_read_group_size.png"),
-          path("${sample_name}_duplex_allele_counts.txt")
-
-    script:
-    def gene_arg = gene_bed.name != 'NO_GENE' ? "-gb ${gene_bed}" : ""
-    def clonal_arg = params.estimate_clonal ? "-c true" : ""
-    def dilute_arg = params.estimate_dilute ? "-d true" : ""
-
-    """
-    # Copy variant call outputs to current directory for estimate command
-    ln -s ${snv_vcf} .
-    ln -s ${indel_vcf} .
-    ln -s ${coverage} .
-    ln -s ${trinuc} .
-    ln -s ${duplex_stats} .
-    ln -s ${stats} .
-    ln -s ${amp_tn} .
-    ln -s ${amp_id} .
-    ln -s ${dmg_tn} .
-    ln -s ${dmg_id} .
-
-    DupCaller.py estimate \\
-        -i ${sample_name} \\
-        -f ${reference} \\
-        -r ${params.regions} \\
-        ${gene_arg} \\
-        ${clonal_arg} \\
-        ${dilute_arg}
-    """
-}
 
 /*
  * Main workflow
  */
 workflow {
     // Check reference files
-    ref_ch = Channel.fromPath(params.reference, checkIfExists: true)
+    ref_ch = channel.fromPath(params.reference, checkIfExists: true)
     ref_h5 = params.reference+".ref.h5"
     tn_h5 = params.reference+".tn.h5"
     hp_h5 = params.reference+".hp.h5"
-    indexes = Channel.fromPath(params.reference+".{amb,ann,bwt,pac,sa}", checkIfExists: true).collect()
+    indexes = channel.fromPath(params.reference+".{amb,ann,bwt,pac,sa}", checkIfExists: true).collect()
 
     // Handle optional files
-    germline_ch = params.germline_vcf ? Channel.fromPath(params.germline_vcf, checkIfExists: true) : Channel.value(file('NO_GERMLINE'))
-    germline_index_ch = params.germline_vcf ? Channel.fromPath(params.germline_vcf + ".tbi", checkIfExists: true) : Channel.value(file('NO_GERMLINE_IDX'))
+    germline_ch = params.germline_vcf ? channel.fromPath(params.germline_vcf, checkIfExists: true) : channel.value(file('NO_GERMLINE'))
+    germline_index_ch = params.germline_vcf ? channel.fromPath(params.germline_vcf + ".tbi", checkIfExists: true) : channel.value(file('NO_GERMLINE_IDX'))
     
-    noise_ch = params.noise_mask ? Channel.fromPath(params.noise_mask, checkIfExists: true) : Channel.value(file('NO_NOISE'))
-    noise_index_ch = params.noise_mask ? Channel.fromPath(params.noise_mask + ".tbi", checkIfExists: true) : Channel.value(file('NO_NOISE_IDX'))
+    noise_ch = params.noise_mask ? channel.fromPath(params.noise_mask, checkIfExists: true) : channel.value(file('NO_NOISE'))
+    noise_index_ch = params.noise_mask ? channel.fromPath(params.noise_mask + ".tbi", checkIfExists: true) : channel.value(file('NO_NOISE_IDX'))
     
-    indel_ch = params.indel_bed ? Channel.fromPath(params.indel_bed, checkIfExists: true) : Channel.value(file('NO_INDEL'))
-    gene_ch = params.gene_bed ? Channel.fromPath(params.gene_bed, checkIfExists: true) : Channel.value(file('NO_GENE')) 
+    indel_ch = params.indel_bed ? channel.fromPath(params.indel_bed, checkIfExists: true) : channel.value(file('NO_INDEL'))
+    gene_ch = params.gene_bed ? channel.fromPath(params.gene_bed, checkIfExists: true) : channel.value(file('NO_GENE')) 
 
     // Tumor sample processing
     if (!params.skip_trim && params.read1 && params.read2) {
         // Start from FASTQ
-        reads_ch = Channel.of([params.sample_name, file(params.read1), file(params.read2)])
+        reads_ch = INPUT_CHECK(channel.value(file(params.samplesheet)))
         trimmed = TRIM_BARCODES(reads_ch)
 
         // Combine with reference
@@ -390,36 +192,36 @@ workflow {
 
     // Normal sample handling
     if (params.normal_bam) {
-        normal_ch = Channel.fromPath(params.normal_bam, checkIfExists: true)
+        normal_ch = channel.fromPath(params.normal_bam, checkIfExists: true)
     } else if (params.normal_read1 && params.normal_read2 && !params.skip_normal) {
-        normal_reads = Channel.of(["normal_${params.sample_name}", file(params.normal_read1), file(params.normal_read2)])
+        normal_reads = channel.of(["normal_${params.sample_name}", file(params.normal_read1), file(params.normal_read2)])
         normal_trimmed = TRIM_BARCODES(normal_reads)
         normal_align_input = normal_trimmed.combine(ref_ch).combine(indexes)
         normal_aligned = BWA_ALIGN(normal_align_input)
         normal_markdup = MARK_DUPLICATES(normal_aligned)
         normal_ch = normal_markdup.map { it[1] }
     } else {
-        normal_ch = Channel.value(file('NO_NORMAL'))
+        normal_ch = channel.value(file('NO_NORMAL'))
     }
 
     // Variant calling
     // Add h5 files to the call_input tuple
-    ref_files_ch = Channel.of([file(ref_h5), file(tn_h5), file(hp_h5)])
+    ref_files_ch = channel.of([file(ref_h5), file(tn_h5), file(hp_h5)])
     call_input = markdup.combine(ref_ch).combine(ref_files_ch)
-    
+
     variants = CALL_VARIANTS(
         call_input,
         normal_ch,
-        germline_ch,
-        germline_index_ch,
-        noise_ch,
-        noise_index_ch,
+        germline_ch.first(),
+        germline_index_ch.first(),
+        noise_ch.first(),
+        noise_index_ch.first(),
         indel_ch
     )
 
     // Burden estimation
-    burden_input = variants.combine(ref_ch)
-    burden = ESTIMATE_BURDEN(burden_input, gene_ch)
+    burden_input = variants.combine(ref_ch).combine(ref_files_ch)
+    ESTIMATE_BURDEN(burden_input, gene_ch)
 }
 
 workflow.onComplete {
